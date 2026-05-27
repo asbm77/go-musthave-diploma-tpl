@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"log"
 	"net/http"
 	"os"
@@ -10,8 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/logger"
 )
 
 var (
