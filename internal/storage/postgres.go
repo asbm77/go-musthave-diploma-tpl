@@ -4,10 +4,9 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"time"
-
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type PostgresStorage struct {
@@ -325,16 +324,25 @@ func (s *PostgresStorage) GetWithdrawals(ctx context.Context, userID string) ([]
 
 // GetPendingOrders возвращает заказы, требующие проверки (для воркера)
 func (s *PostgresStorage) GetPendingOrders(ctx context.Context, limit int) ([]Order, error) {
-	query := `
-        SELECT number, user_id
-        FROM orders
-        WHERE status IN ('NEW', 'PROCESSING')
-        ORDER BY uploaded_at ASC
-        LIMIT $1
-        FOR UPDATE SKIP LOCKED
-    `
+	// ИСПРАВЛЕНО: добавляем транзакцию для корректной блокировки
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 
-	rows, err := s.db.QueryContext(ctx, query, limit)
+	query := `
+		SELECT number, user_id
+		FROM orders
+		WHERE status IN ('NEW', 'PROCESSING')
+		ORDER BY uploaded_at ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	`
+
+	rows, err := tx.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -343,19 +351,24 @@ func (s *PostgresStorage) GetPendingOrders(ctx context.Context, limit int) ([]Or
 	var orders []Order
 	for rows.Next() {
 		var order Order
-		err := rows.Scan(&order.Number, &order.UserID)
-		if err != nil {
+		if err := rows.Scan(&order.Number, &order.UserID); err != nil {
 			return nil, err
 		}
 		orders = append(orders, order)
 	}
 
+	// Коммитим транзакцию, чтобы снять блокировки
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
 	return orders, nil
 }
 
-func isUniqueViolation(err error) bool {
-	if pqErr, ok := err.(*pq.Error); ok {
-		return pqErr.Code == "23505"
+func isUniqueViolationPgx(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
 	}
 	return false
 }

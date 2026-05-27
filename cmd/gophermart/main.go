@@ -1,4 +1,3 @@
-// cmd/server/main.go
 package main
 
 import (
@@ -23,11 +22,10 @@ var (
 
 func parseFlags() {
 	flag.StringVar(&flagRunAddr, "a", "localhost:8080", "address and port to run server")
-	flag.StringVar(&flagDatabaseURI, "d", "postgres://postgres:password@localhost:5432/loyalty?sslmode=disable", "database URI")
-	flag.StringVar(&flagAccrualAddr, "r", "http://localhost:8081", "accrual system address")
+	flag.StringVar(&flagDatabaseURI, "d", "", "database URI")
+	flag.StringVar(&flagAccrualAddr, "r", "", "accrual system address")
 	flag.Parse()
 
-	// Также читаем из окружения
 	if envAddr := os.Getenv("RUN_ADDRESS"); envAddr != "" {
 		flagRunAddr = envAddr
 	}
@@ -42,35 +40,49 @@ func parseFlags() {
 func main() {
 	parseFlags()
 
-	// Инициализируем логгер
+	// Инициализация логгера
 	if err := logger.Initialize("info"); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 
-	// Подключаемся к БД
+	// JWT секрет из переменной окружения
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		logger.Logger.Warn("JWT_SECRET not set, using default (not safe for production)")
+		jwtSecret = "default-secret-change-in-production"
+	}
+
+	// Подключение к БД
+	if flagDatabaseURI == "" {
+		logger.Logger.Fatal("DATABASE_URI is required")
+	}
+
 	pgStorage, err := storage.NewPostgresStorage(flagDatabaseURI)
 	if err != nil {
 		logger.Logger.Fatalw("Failed to connect to database", "error", err)
 	}
 	defer pgStorage.Close()
 
-	// Выполняем миграции
+	// Миграции
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := pgStorage.RunMigrations(ctx); err != nil {
 		logger.Logger.Fatalw("Failed to run migrations", "error", err)
 	}
 	cancel()
 
-	// Создаём воркер для обработки заказов (fan-in паттерн)
+	// Воркер для обработки заказов
+	if flagAccrualAddr == "" {
+		logger.Logger.Warn("ACCRUAL_SYSTEM_ADDRESS not set, order processing will be disabled")
+	}
 	orderProcessor := worker.NewOrderProcessor(pgStorage, flagAccrualAddr, 1000, 10)
 	orderProcessor.Start()
 	defer orderProcessor.Stop()
 
-	// Инициализируем аутентификацию
-	jwtAuth := auth.NewJWTAuth("your-secret-key-change-in-production")
+	// Аутентификация
+	jwtAuth := auth.NewJWTAuth(jwtSecret)
 	authHandler := handlers.NewAuthHandler(pgStorage, jwtAuth)
 
-	// Создаём роутер
+	// Роутер
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -85,25 +97,19 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(jwtAuth.Middleware)
 
-		// Заказы
 		r.Post("/api/user/orders", handlers.UploadOrder(pgStorage, orderProcessor))
 		r.Get("/api/user/orders", handlers.GetUserOrders(pgStorage))
-
-		// Баланс
 		r.Get("/api/user/balance", handlers.GetBalance(pgStorage))
 		r.Post("/api/user/balance/withdraw", handlers.Withdraw(pgStorage))
-
-		// Выводы
 		r.Get("/api/user/withdrawals", handlers.GetWithdrawals(pgStorage))
 	})
 
-	// Запускаем сервер
+	// Сервер
 	srv := &http.Server{
 		Addr:    flagRunAddr,
 		Handler: r,
 	}
 
-	// Graceful shutdown
 	go func() {
 		logger.Logger.Infow("Starting server", "address", flagRunAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -116,13 +122,8 @@ func main() {
 	<-quit
 
 	logger.Logger.Info("Shutting down server...")
-
 	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Logger.Errorw("Server shutdown error", "error", err)
-	}
-
+	srv.Shutdown(ctx)
 	logger.Logger.Info("Server stopped")
 }

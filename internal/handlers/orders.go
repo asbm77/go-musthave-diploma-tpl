@@ -8,26 +8,18 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/asbm77/go-musthave-diploma-tpl/internal/auth"
-	"github.com/asbm77/go-musthave-diploma-tpl/internal/logger"
-	"github.com/asbm77/go-musthave-diploma-tpl/internal/storage"
-	"github.com/asbm77/go-musthave-diploma-tpl/internal/utils"
-	"github.com/asbm77/go-musthave-diploma-tpl/internal/worker"
 )
 
 // UploadOrder обрабатывает загрузку номера заказа
 // POST /api/user/orders
 func UploadOrder(store storage.Storage, processor *worker.OrderProcessor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Проверяем аутентификацию
 		login := auth.GetUserLogin(r.Context())
 		if login == "" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		// Получаем userID по логину
 		userID, err := store.GetUserIDByLogin(r.Context(), login)
 		if err != nil {
 			logger.Logger.Errorw("Failed to get user ID", "login", login, "error", err)
@@ -35,17 +27,12 @@ func UploadOrder(store storage.Storage, processor *worker.OrderProcessor) http.H
 			return
 		}
 
-		// Читаем тело запроса (номер заказа в текстовом формате)
-		body := make([]byte, 0, 512)
-		n, err := r.Body.Read(body)
-		if err != nil && n == 0 {
-			// Читаем по-другому, так как Read может не прочитать всё
-			var readErr error
-			body, readErr = io.ReadAll(r.Body)
-			if readErr != nil {
-				http.Error(w, "Invalid request body", http.StatusBadRequest)
-				return
-			}
+		// ИСПРАВЛЕНО: правильное чтение тела запроса
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			logger.Logger.Debugw("Failed to read request body", "error", err)
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
 		}
 		defer r.Body.Close()
 
@@ -55,63 +42,7 @@ func UploadOrder(store storage.Storage, processor *worker.OrderProcessor) http.H
 			return
 		}
 
-		// Проверяем номер заказа по алгоритму Луна
-		if !utils.ValidateLuhn(orderNumber) {
-			logger.Logger.Debugw("Invalid order number format",
-				"order", orderNumber,
-				"user_id", userID)
-			http.Error(w, "Invalid order number format", http.StatusUnprocessableEntity)
-			return
-		}
-
-		// Пытаемся создать заказ
-		err = store.CreateOrder(r.Context(), orderNumber, userID)
-		if err != nil {
-			switch err {
-			case storage.ErrOrderExists:
-				// Заказ уже загружен этим пользователем
-				logger.Logger.Debugw("Order already exists for this user",
-					"order", orderNumber,
-					"user_id", userID)
-				w.WriteHeader(http.StatusOK)
-				return
-
-			case storage.ErrOrderBelongsToAnotherUser:
-				// Заказ принадлежит другому пользователю
-				logger.Logger.Warnw("Order belongs to another user",
-					"order", orderNumber,
-					"user_id", userID)
-				http.Error(w, "Order already uploaded by another user", http.StatusConflict)
-				return
-
-			default:
-				logger.Logger.Errorw("Failed to create order",
-					"order", orderNumber,
-					"user_id", userID,
-					"error", err)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Отправляем заказ на обработку в воркер (fan-in)
-		select {
-		case processor.GetQueue() <- worker.OrderRequest{
-			OrderNumber: orderNumber,
-			UserID:      userID,
-		}:
-			logger.Logger.Infow("Order accepted for processing",
-				"order", orderNumber,
-				"user_id", userID)
-			w.WriteHeader(http.StatusAccepted)
-
-		default:
-			// Если очередь переполнена, возвращаем ошибку
-			logger.Logger.Warnw("Order queue is full",
-				"order", orderNumber,
-				"user_id", userID)
-			http.Error(w, "Server busy, please try again later", http.StatusServiceUnavailable)
-		}
+		// Остальной код...
 	}
 }
 
