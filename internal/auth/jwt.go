@@ -39,10 +39,8 @@ func (j *JWTAuth) GenerateToken(userID int64) (string, error) {
 
 // ValidateToken проверяет JWT токен и возвращает userID
 func (j *JWTAuth) ValidateToken(r *http.Request) (int64, error) {
-	// Получаем токен из заголовка Authorization
 	tokenString := r.Header.Get("Authorization")
 	if tokenString == "" {
-		// Пробуем получить из cookie
 		cookie, err := r.Cookie("token")
 		if err == nil {
 			tokenString = cookie.Value
@@ -53,7 +51,6 @@ func (j *JWTAuth) ValidateToken(r *http.Request) (int64, error) {
 		return 0, errors.New("no token provided")
 	}
 
-	// Убираем "Bearer " если есть
 	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
 		tokenString = tokenString[7:]
 	}
