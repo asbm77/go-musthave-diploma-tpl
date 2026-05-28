@@ -195,6 +195,11 @@ func (s *PostgresStorage) GetUserOrders(ctx context.Context, userID int64) ([]*m
 		orders = append(orders, &order)
 	}
 
+	// Проверяем ошибки после итерации
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
 	return orders, nil
 }
 
@@ -251,7 +256,7 @@ func (s *PostgresStorage) GetUserBalance(ctx context.Context, userID int64) (*mo
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(&balance.UserID, &balance.Current, &balance.Withdrawn, &balance.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return &models.Balance{UserID: userID, Current: 0, Withdrawn: 0}, nil
+			return &models.Balance{UserID: userID, Current: 0, Withdrawn: 0, UpdatedAt: time.Now()}, nil
 		}
 		return nil, fmt.Errorf("failed to get balance: %w", err)
 	}
@@ -324,7 +329,44 @@ func (s *PostgresStorage) GetUserWithdrawals(ctx context.Context, userID int64) 
 		withdrawals = append(withdrawals, &wd)
 	}
 
+	// Проверяем ошибки после итерации
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
 	return withdrawals, nil
+}
+
+// GetPendingOrders получает заказы со статусом NEW или PROCESSING
+func (s *PostgresStorage) GetPendingOrders(ctx context.Context) ([]*models.Order, error) {
+	query := `
+		SELECT number, user_id, status, accrual, uploaded_at, updated_at
+		FROM orders
+		WHERE status IN ('NEW', 'PROCESSING')
+		ORDER BY uploaded_at ASC`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending orders: %w", err)
+	}
+	defer rows.Close()
+
+	var orders []*models.Order
+	for rows.Next() {
+		var order models.Order
+		err := rows.Scan(&order.Number, &order.UserID, &order.Status, &order.Accrual, &order.UploadedAt, &order.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan order: %w", err)
+		}
+		orders = append(orders, &order)
+	}
+
+	// Проверяем ошибки после итерации
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	return orders, nil
 }
 
 // GetPendingOrdersForUpdate получает заказы для обработки с блокировкой
@@ -356,6 +398,11 @@ func (s *PostgresStorage) GetPendingOrdersForUpdate(ctx context.Context) ([]*mod
 			return nil, fmt.Errorf("failed to scan order: %w", err)
 		}
 		orders = append(orders, &order)
+	}
+
+	// Проверяем ошибки после итерации
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

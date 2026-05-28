@@ -144,7 +144,7 @@ func TestOrderNumberValidation(t *testing.T) {
 	}
 }
 
-// testIsValidLuhn - реализация алгоритма Луна для теста (исправленная версия)
+// testIsValidLuhn - реализация алгоритма Луна для теста
 func testIsValidLuhn(number string) bool {
 	if number == "" {
 		return false
@@ -219,21 +219,30 @@ func TestJWTSecretRequired(t *testing.T) {
 
 // TestGracefulShutdown - тест graceful shutdown
 func TestGracefulShutdown(t *testing.T) {
-	// Проверяем, что каналы для сигналов создаются
+	// Создаём канал для сигналов
 	sigChan := make(chan os.Signal, 1)
+
+	// Проверяем, что канал создан (не nil)
 	if sigChan == nil {
-		t.Error("Signal channel is nil")
+		t.Error("Signal channel should not be nil")
 	}
 
-	// Проверяем, что контекст с таймаутом создаётся
+	// Создаём контекст с таймаутом
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	// Проверяем, что контекст создан
 	if ctx == nil {
-		t.Error("Context is nil")
+		t.Error("Context should not be nil")
 	}
 	if cancel == nil {
-		t.Error("Cancel function is nil")
+		t.Error("Cancel function should not be nil")
 	}
+
+	// Отменяем контекст
 	cancel()
+
+	// Закрываем канал (хорошая практика, но не обязательно для теста)
+	close(sigChan)
 }
 
 // TestPostgresConnectionString - тест строки подключения к PostgreSQL
