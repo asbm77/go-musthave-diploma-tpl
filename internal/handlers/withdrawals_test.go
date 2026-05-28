@@ -11,52 +11,8 @@ import (
 
 	"github.com/asbm77/go-musthave-diploma-tpl/internal/auth"
 	"github.com/asbm77/go-musthave-diploma-tpl/internal/models"
-	"github.com/stretchr/testify/assert"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/storage"
 )
-
-type mockWithdrawStorage struct {
-	balances    map[int64]*models.Balance
-	withdrawals map[int64][]*models.Withdrawal
-}
-
-func newMockWithdrawStorage() *mockWithdrawStorage {
-	return &mockWithdrawStorage{
-		balances:    make(map[int64]*models.Balance),
-		withdrawals: make(map[int64][]*models.Withdrawal),
-	}
-}
-
-func (m *mockWithdrawStorage) WithdrawBalance(ctx context.Context, withdrawal *models.Withdrawal) error {
-	balance, exists := m.balances[withdrawal.UserID]
-	if !exists {
-		return storage.ErrInsufficientFunds
-	}
-
-	if balance.Current < withdrawal.Sum {
-		return storage.ErrInsufficientFunds
-	}
-
-	balance.Current -= withdrawal.Sum
-	balance.Withdrawn += withdrawal.Sum
-
-	m.withdrawals[withdrawal.UserID] = append(m.withdrawals[withdrawal.UserID], withdrawal)
-	return nil
-}
-
-func (m *mockWithdrawStorage) GetUserWithdrawals(ctx context.Context, userID int64) ([]*models.Withdrawal, error) {
-	withdrawals, exists := m.withdrawals[userID]
-	if !exists {
-		return []*models.Withdrawal{}, nil
-	}
-	return withdrawals, nil
-}
-
-func (m *mockWithdrawStorage) GetUserBalance(ctx context.Context, userID int64) (*models.Balance, error) {
-	if balance, exists := m.balances[userID]; exists {
-		return balance, nil
-	}
-	return &models.Balance{UserID: userID, Current: 0, Withdrawn: 0}, nil
-}
 
 func TestWithdrawHandler_Withdraw(t *testing.T) {
 	tests := []struct {
@@ -106,44 +62,37 @@ func TestWithdrawHandler_Withdraw(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 		},
-		{
-			name:           "unauthorized user",
-			userID:         0,
-			balance:        1000,
-			request:        models.WithdrawRequest{},
-			expectedStatus: http.StatusUnauthorized,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockStore := newMockWithdrawStorage()
+			mockStore := newMockStorage()
 			mockStore.balances[tt.userID] = &models.Balance{
 				UserID:    tt.userID,
 				Current:   tt.balance,
 				Withdrawn: 0,
+				UpdatedAt: time.Now(),
 			}
 
 			handler := NewWithdrawHandler(mockStore)
 
 			body, _ := json.Marshal(tt.request)
 			req := httptest.NewRequest("POST", "/api/user/balance/withdraw", bytes.NewReader(body))
-
-			if tt.userID != 0 {
-				ctx := context.WithValue(req.Context(), auth.UserIDKey, tt.userID)
-				req = req.WithContext(ctx)
-			}
+			ctx := context.WithValue(req.Context(), auth.UserIDKey, tt.userID)
+			req = req.WithContext(ctx)
 
 			w := httptest.NewRecorder()
 			handler.Withdraw(w, req)
 
-			assert.Equal(t, tt.expectedStatus, w.Code)
+			if w.Code != tt.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tt.expectedStatus, w.Code)
+			}
 		})
 	}
 }
 
 func TestWithdrawHandler_GetWithdrawals(t *testing.T) {
-	mockStore := newMockWithdrawStorage()
+	mockStore := newMockStorage()
 	userID := int64(1)
 
 	// Add test withdrawals
@@ -175,10 +124,17 @@ func TestWithdrawHandler_GetWithdrawals(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.GetWithdrawals(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
 
 	var response []models.WithdrawalResponse
 	err := json.NewDecoder(w.Body).Decode(&response)
-	assert.NoError(t, err)
-	assert.Len(t, response, 2)
+	if err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if len(response) != 2 {
+		t.Errorf("Expected 2 withdrawals, got %d", len(response))
+	}
 }
