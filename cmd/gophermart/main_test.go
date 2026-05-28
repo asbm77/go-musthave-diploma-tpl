@@ -219,29 +219,34 @@ func TestJWTSecretRequired(t *testing.T) {
 
 // TestGracefulShutdown - тест graceful shutdown
 func TestGracefulShutdown(t *testing.T) {
-	// Создаём канал для сигналов
+	// Проверяем создание канала
 	sigChan := make(chan os.Signal, 1)
 
-	// Проверяем, что канал создан (не nil)
-	if sigChan == nil {
-		t.Error("Signal channel should not be nil")
-	}
-
-	// Создаём контекст с таймаутом
+	// Проверяем создание и отмену контекста
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	// Проверяем, что контекст создан
-	if ctx == nil {
-		t.Error("Context should not be nil")
-	}
-	if cancel == nil {
-		t.Error("Cancel function should not be nil")
-	}
-
-	// Отменяем контекст
 	cancel()
 
-	// Закрываем канал (хорошая практика, но не обязательно для теста)
+	// Проверяем, что контекст отменён
+	select {
+	case <-ctx.Done():
+		// Ожидаемое поведение
+	default:
+		t.Error("Context should be canceled")
+	}
+
+	// Убеждаемся, что канал работает
+	go func() {
+		sigChan <- os.Interrupt
+	}()
+
+	select {
+	case <-sigChan:
+		// Сигнал получен
+		t.Log("Signal channel works")
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Timeout waiting for signal")
+	}
+
 	close(sigChan)
 }
 
