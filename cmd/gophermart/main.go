@@ -1,4 +1,3 @@
-// cmd/server/main.go
 package main
 
 import (
@@ -11,8 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/auth"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/handlers"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/middleware"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/storage"
+	"github.com/asbm77/go-musthave-diploma-tpl/internal/worker"
+	"github.com/asbm77/go-musthave-diploma-tpl/pkg/logger"
 )
 
 var (
@@ -27,7 +30,6 @@ func parseFlags() {
 	flag.StringVar(&flagAccrualAddr, "r", "http://localhost:8081", "accrual system address")
 	flag.Parse()
 
-	// Также читаем из окружения
 	if envAddr := os.Getenv("RUN_ADDRESS"); envAddr != "" {
 		flagRunAddr = envAddr
 	}
@@ -42,68 +44,68 @@ func parseFlags() {
 func main() {
 	parseFlags()
 
-	// Инициализируем логгер
+	// Инициализация логгера
 	if err := logger.Initialize("info"); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
+	defer logger.Sync()
 
-	// Подключаемся к БД
+	// Подключение к БД
 	pgStorage, err := storage.NewPostgresStorage(flagDatabaseURI)
 	if err != nil {
 		logger.Logger.Fatalw("Failed to connect to database", "error", err)
 	}
 	defer pgStorage.Close()
 
-	// Выполняем миграции
+	// Выполнение миграций
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := pgStorage.RunMigrations(ctx); err != nil {
 		logger.Logger.Fatalw("Failed to run migrations", "error", err)
 	}
 	cancel()
 
-	// Создаём воркер для обработки заказов (fan-in паттерн)
-	orderProcessor := worker.NewOrderProcessor(pgStorage, flagAccrualAddr, 1000, 10)
+	// Создание воркера для обработки заказов
+	orderProcessor := worker.NewOrderProcessor(pgStorage, flagAccrualAddr, 100, 5)
 	orderProcessor.Start()
 	defer orderProcessor.Stop()
 
-	// Инициализируем аутентификацию
+	// Инициализация JWT аутентификации
 	jwtAuth := auth.NewJWTAuth("your-secret-key-change-in-production")
-	authHandler := handlers.NewAuthHandler(pgStorage, jwtAuth)
 
-	// Создаём роутер
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-	r.Use(logger.HTTPLogger)
+	// Создание хендлеров
+	authHandler := handlers.NewAuthHandler(pgStorage, jwtAuth)
+	orderHandler := handlers.NewOrderHandler(pgStorage, orderProcessor)
+	balanceHandler := handlers.NewBalanceHandler(pgStorage)
+	withdrawHandler := handlers.NewWithdrawHandler(pgStorage)
+
+	// Создание маршрутизатора
+	mux := http.NewServeMux()
 
 	// Публичные маршруты
-	r.Post("/api/user/register", authHandler.Register)
-	r.Post("/api/user/login", authHandler.Login)
+	mux.HandleFunc("POST /api/user/register", authHandler.Register)
+	mux.HandleFunc("POST /api/user/login", authHandler.Login)
 
 	// Защищённые маршруты
-	r.Group(func(r chi.Router) {
-		r.Use(jwtAuth.Middleware)
+	mux.HandleFunc("POST /api/user/orders", middleware.RequireAuth(jwtAuth, orderHandler.UploadOrder))
+	mux.HandleFunc("GET /api/user/orders", middleware.RequireAuth(jwtAuth, orderHandler.GetUserOrders))
+	mux.HandleFunc("GET /api/user/balance", middleware.RequireAuth(jwtAuth, balanceHandler.GetBalance))
+	mux.HandleFunc("POST /api/user/balance/withdraw", middleware.RequireAuth(jwtAuth, withdrawHandler.Withdraw))
+	mux.HandleFunc("GET /api/user/withdrawals", middleware.RequireAuth(jwtAuth, withdrawHandler.GetWithdrawals))
 
-		// Заказы
-		r.Post("/api/user/orders", handlers.UploadOrder(pgStorage, orderProcessor))
-		r.Get("/api/user/orders", handlers.GetUserOrders(pgStorage))
+	// Оборачивание в middleware
+	var handler http.Handler = mux
+	handler = middleware.RecoveryMiddleware(handler)
+	handler = middleware.LoggingMiddleware(handler)
 
-		// Баланс
-		r.Get("/api/user/balance", handlers.GetBalance(pgStorage))
-		r.Post("/api/user/balance/withdraw", handlers.Withdraw(pgStorage))
-
-		// Выводы
-		r.Get("/api/user/withdrawals", handlers.GetWithdrawals(pgStorage))
-	})
-
-	// Запускаем сервер
+	// Запуск сервера
 	srv := &http.Server{
-		Addr:    flagRunAddr,
-		Handler: r,
+		Addr:         flagRunAddr,
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown
 	go func() {
 		logger.Logger.Infow("Starting server", "address", flagRunAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -111,6 +113,7 @@ func main() {
 		}
 	}()
 
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

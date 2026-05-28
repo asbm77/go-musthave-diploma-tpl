@@ -1,90 +1,90 @@
-// internal/auth/jwt.go
 package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-type JWTAuth struct {
-	secret []byte
-}
-
 type contextKey string
 
-const userLoginKey contextKey = "user_login"
+const UserIDKey contextKey = "userID"
 
+// JWTAuth управляет JWT аутентификацией
+type JWTAuth struct {
+	secretKey []byte
+}
+
+// NewJWTAuth создаёт новый экземпляр JWTAuth
 func NewJWTAuth(secret string) *JWTAuth {
-	return &JWTAuth{secret: []byte(secret)}
+	return &JWTAuth{
+		secretKey: []byte(secret),
+	}
 }
 
-func (a *JWTAuth) GenerateToken(login string) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"login": login,
-		"exp":   time.Now().Add(24 * time.Hour).Unix(),
-	})
+// GenerateToken генерирует JWT токен для пользователя
+func (j *JWTAuth) GenerateToken(userID int64) (string, error) {
+	claims := jwt.MapClaims{
+		"user_id": userID,
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"iat":     time.Now().Unix(),
+	}
 
-	return token.SignedString(a.secret)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(j.secretKey)
 }
 
-func (a *JWTAuth) ValidateToken(tokenString string) (string, error) {
+// ValidateToken проверяет JWT токен и возвращает userID
+func (j *JWTAuth) ValidateToken(r *http.Request) (int64, error) {
+	// Получаем токен из заголовка Authorization
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		// Пробуем получить из cookie
+		cookie, err := r.Cookie("token")
+		if err == nil {
+			tokenString = cookie.Value
+		}
+	}
+
+	if tokenString == "" {
+		return 0, errors.New("no token provided")
+	}
+
+	// Убираем "Bearer " если есть
+	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
+		tokenString = tokenString[7:]
+	}
+
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return a.secret, nil
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return j.secretKey, nil
 	})
 
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		login, ok := claims["login"].(string)
+		userIDFloat, ok := claims["user_id"].(float64)
 		if !ok {
-			return "", jwt.ErrInvalidKey
+			return 0, errors.New("invalid user_id in token")
 		}
-		return login, nil
+		return int64(userIDFloat), nil
 	}
 
-	return "", jwt.ErrInvalidKey
+	return 0, errors.New("invalid token")
 }
 
-func (a *JWTAuth) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Проверяем cookie
-		cookie, err := r.Cookie("token")
-		if err == nil && cookie.Value != "" {
-			login, err := a.ValidateToken(cookie.Value)
-			if err == nil {
-				ctx := context.WithValue(r.Context(), userLoginKey, login)
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-		}
-
-		// Проверяем заголовок Authorization
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
-			parts := strings.Split(authHeader, " ")
-			if len(parts) == 2 && parts[0] == "Bearer" {
-				login, err := a.ValidateToken(parts[1])
-				if err == nil {
-					ctx := context.WithValue(r.Context(), userLoginKey, login)
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
-			}
-		}
-
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	})
-}
-
-func GetUserLogin(ctx context.Context) string {
-	if login, ok := ctx.Value(userLoginKey).(string); ok {
-		return login
+// GetUserIDFromContext получает userID из контекста запроса
+func GetUserIDFromContext(ctx context.Context) (int64, error) {
+	userID, ok := ctx.Value(UserIDKey).(int64)
+	if !ok {
+		return 0, errors.New("user ID not found in context")
 	}
-	return ""
+	return userID, nil
 }
