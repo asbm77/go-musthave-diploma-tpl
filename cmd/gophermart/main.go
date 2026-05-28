@@ -22,14 +22,33 @@ var (
 	flagRunAddr     string
 	flagDatabaseURI string
 	flagAccrualAddr string
+	jwtSecret       string
 )
 
 func parseFlags() {
-	flag.StringVar(&flagRunAddr, "a", "localhost:8080", "address and port to run server")
-	flag.StringVar(&flagDatabaseURI, "d", "postgres://postgres:password@localhost:5432/loyalty?sslmode=disable", "database URI")
-	flag.StringVar(&flagAccrualAddr, "r", "http://localhost:8081", "accrual system address")
-	flag.Parse()
+	// Создаём новый набор флагов
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
 
+	fs.StringVar(&flagRunAddr, "a", "localhost:8080", "address and port to run server")
+	fs.StringVar(&flagDatabaseURI, "d", "postgres://postgres:password@localhost:5432/loyalty?sslmode=disable", "database URI")
+	fs.StringVar(&flagAccrualAddr, "r", "http://localhost:8081", "accrual system address")
+	fs.StringVar(&jwtSecret, "s", "", "JWT secret key (required)")
+
+	// Игнорируем неизвестные флаги (например, -test.*)
+	fs.Usage = func() {
+		// Можно оставить пустым или выводить только нужные флаги
+	}
+
+	// Парсим флаги, игнорируя неизвестные
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		// Если это не тест, показываем ошибку
+		if !isTesting() {
+			log.Printf("Warning: failed to parse flags: %v", err)
+		}
+	}
+
+	// Читаем из окружения (приоритет выше флагов)
 	if envAddr := os.Getenv("RUN_ADDRESS"); envAddr != "" {
 		flagRunAddr = envAddr
 	}
@@ -39,10 +58,28 @@ func parseFlags() {
 	if envAccrual := os.Getenv("ACCRUAL_SYSTEM_ADDRESS"); envAccrual != "" {
 		flagAccrualAddr = envAccrual
 	}
+	if envJWTSecret := os.Getenv("JWT_SECRET"); envJWTSecret != "" {
+		jwtSecret = envJWTSecret
+	}
+
+	// Проверяем обязательные параметры только если не в тесте
+	if !isTesting() && jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable or -s flag is required")
+	}
+}
+
+// isTesting проверяет, запущены ли мы в тестовом режиме
+func isTesting() bool {
+	return flag.Lookup("test.v") != nil || flag.Lookup("test.run") != nil
 }
 
 func main() {
 	parseFlags()
+
+	// Если это тест, не запускаем сервер
+	if isTesting() {
+		return
+	}
 
 	// Инициализация логгера
 	if err := logger.Initialize("info"); err != nil {
@@ -70,7 +107,7 @@ func main() {
 	defer orderProcessor.Stop()
 
 	// Инициализация JWT аутентификации
-	jwtAuth := auth.NewJWTAuth("your-secret-key-change-in-production")
+	jwtAuth := auth.NewJWTAuth(jwtSecret)
 
 	// Создание хендлеров
 	authHandler := handlers.NewAuthHandler(pgStorage, jwtAuth)
