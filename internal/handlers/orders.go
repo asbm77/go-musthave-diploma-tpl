@@ -38,11 +38,14 @@ func (h *OrderHandler) UploadOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Читаем body правильно - используем io.ReadAll
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		logger.Logger.Errorw("Failed to read request body", "error", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	defer r.Body.Close()
 
 	orderNumber := strings.TrimSpace(string(body))
 	if orderNumber == "" {
@@ -50,11 +53,15 @@ func (h *OrderHandler) UploadOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger.Logger.Debugw("Received order number", "order", orderNumber, "body_length", len(body))
+
+	// Проверяем номер заказа по алгоритму Луна
 	if !isValidLuhn(orderNumber) {
 		http.Error(w, "Invalid order number format", http.StatusUnprocessableEntity)
 		return
 	}
 
+	// Проверяем, существует ли уже заказ
 	existingOrder, err := h.storage.GetOrderByNumber(r.Context(), orderNumber)
 	if err != nil && !errors.Is(err, storage.ErrOrderNotFound) {
 		logger.Logger.Errorw("Failed to check existing order", "error", err)
@@ -129,6 +136,7 @@ func isValidLuhn(number string) bool {
 	var alternate bool
 
 	number = strings.ReplaceAll(number, " ", "")
+	number = strings.ReplaceAll(number, "-", "")
 
 	for i := len(number) - 1; i >= 0; i-- {
 		n, err := strconv.Atoi(string(number[i]))

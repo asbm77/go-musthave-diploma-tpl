@@ -99,7 +99,6 @@ func (s *PostgresStorage) CreateUser(ctx context.Context, login, password string
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	// Создаём запись баланса для пользователя
 	balanceQuery := `
 		INSERT INTO balances (user_id, current, withdrawn)
 		VALUES ($1, 0, 0)`
@@ -211,7 +210,6 @@ func (s *PostgresStorage) UpdateOrderStatus(ctx context.Context, number string, 
 		return fmt.Errorf("failed to update order status: %w", err)
 	}
 
-	// Если заказ обработан и есть начисление, обновляем баланс пользователя
 	if status == "PROCESSED" && accrual != nil && *accrual > 0 {
 		if err := s.updateUserBalance(ctx, number, *accrual); err != nil {
 			return fmt.Errorf("failed to update user balance: %w", err)
@@ -223,7 +221,6 @@ func (s *PostgresStorage) UpdateOrderStatus(ctx context.Context, number string, 
 
 // updateUserBalance обновляет баланс пользователя при начислении баллов
 func (s *PostgresStorage) updateUserBalance(ctx context.Context, orderNumber string, accrual float64) error {
-	// Получаем user_id заказа
 	var userID int64
 	err := s.db.QueryRowContext(ctx, "SELECT user_id FROM orders WHERE number = $1", orderNumber).Scan(&userID)
 	if err != nil {
@@ -270,7 +267,6 @@ func (s *PostgresStorage) WithdrawBalance(ctx context.Context, withdrawal *model
 	}
 	defer tx.Rollback()
 
-	// Проверяем и обновляем баланс
 	updateQuery := `
 		UPDATE balances
 		SET current = current - $1,
@@ -288,7 +284,6 @@ func (s *PostgresStorage) WithdrawBalance(ctx context.Context, withdrawal *model
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
-	// Создаём запись о списании
 	insertQuery := `
 		INSERT INTO withdrawals (user_id, order_number, sum, processed_at)
 		VALUES ($1, $2, $3, $4)`
@@ -332,15 +327,22 @@ func (s *PostgresStorage) GetUserWithdrawals(ctx context.Context, userID int64) 
 	return withdrawals, nil
 }
 
-// GetPendingOrders получает заказы со статусом NEW или PROCESSING
-func (s *PostgresStorage) GetPendingOrders(ctx context.Context) ([]*models.Order, error) {
+// GetPendingOrdersForUpdate получает заказы для обработки с блокировкой
+func (s *PostgresStorage) GetPendingOrdersForUpdate(ctx context.Context) ([]*models.Order, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	query := `
 		SELECT number, user_id, status, accrual, uploaded_at, updated_at
 		FROM orders
 		WHERE status IN ('NEW', 'PROCESSING')
-		ORDER BY uploaded_at ASC`
+		ORDER BY uploaded_at ASC
+		FOR UPDATE SKIP LOCKED`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending orders: %w", err)
 	}
@@ -354,6 +356,10 @@ func (s *PostgresStorage) GetPendingOrders(ctx context.Context) ([]*models.Order
 			return nil, fmt.Errorf("failed to scan order: %w", err)
 		}
 		orders = append(orders, &order)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return orders, nil

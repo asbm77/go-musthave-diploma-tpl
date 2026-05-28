@@ -65,7 +65,6 @@ func (p *OrderProcessor) worker() {
 		case order := <-p.ordersChan:
 			p.processOrderWithRetry(order)
 		case <-ticker.C:
-			// Периодически проверяем незавершённые заказы
 			p.processPendingOrders()
 		}
 	}
@@ -76,7 +75,6 @@ func (p *OrderProcessor) processOrderWithRetry(order *models.Order) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Используем клиент с повторными попытками
 	info, err := p.accrualClient.GetOrderInfoWithRetry(ctx, order.Number, 5, 2*time.Second)
 	if err != nil {
 		logger.Logger.Errorw("Failed to process order after retries", "order", order.Number, "error", err)
@@ -84,7 +82,6 @@ func (p *OrderProcessor) processOrderWithRetry(order *models.Order) {
 	}
 
 	if info == nil {
-		// Заказ не зарегистрирован в системе, пробуем позже
 		logger.Logger.Debugw("Order not registered in accrual system", "order", order.Number)
 		return
 	}
@@ -104,7 +101,8 @@ func (p *OrderProcessor) processOrderWithRetry(order *models.Order) {
 
 // processPendingOrders обрабатывает заказы, ожидающие обработки
 func (p *OrderProcessor) processPendingOrders() {
-	orders, err := p.storage.GetPendingOrders(context.Background())
+	// Используем метод с блокировкой
+	orders, err := p.storage.GetPendingOrdersForUpdate(context.Background())
 	if err != nil {
 		logger.Logger.Errorw("Failed to get pending orders", "error", err)
 		return
@@ -131,11 +129,6 @@ func (p *OrderProcessor) processPendingOrders() {
 		}
 
 		cancel()
-		time.Sleep(100 * time.Millisecond) // Небольшая задержка между запросами
+		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-// GetAccrualClient возвращает клиент системы расчёта
-func (p *OrderProcessor) GetAccrualClient() *accrual.Client {
-	return p.accrualClient
 }
